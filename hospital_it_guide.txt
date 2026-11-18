@@ -1,0 +1,14 @@
+ EHR LOGIN PROBLEMS
+If an employee cannot log into the EHR, check the network connection and username. If the account is locked, contact IT support. Never share passwords.
+
+PRINTER PROBLEMS
+Check that the printer is turned on, has paper and toner, and is connected to the correct network. Make sure the correct printer is selected. Contact IT if the problem continues.
+
+NETWORK PROBLEMS
+Check that the device is connected to the approved hospital Wi-Fi network. If the connection is still not working, contact IT support. Do not use unapproved networks.
+
+COMPUTER PROBLEMS
+Check the power connection, monitor, keyboard, and mouse. Restart the computer only if hospital policy allows it and patient care will not be interrupted.
+
+URGENT EHR OUTAGE
+If the EHR system is unavailable across a hospital unit, immediately contact emergency IT support and follow the hospital's approved downtime procedures.

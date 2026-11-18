@@ -1,11 +1,16 @@
 
+import os
 import streamlit as st
 from typing import TypedDict
 from uuid import uuid4
 from langgraph.graph import StateGraph, START, END
+from google import genai
+
+from rag import search_knowledge
+from mcp_client import create_mcp_ticket
 
 
-# Shared information
+# Shared information between agents
 class SupportState(TypedDict):
     question: str
     issue_type: str
@@ -25,8 +30,7 @@ def intake_agent(state):
         "all workstations", "system down",
         "system is down", "ehr down",
         "cannot access patient charts",
-        "outage", "critical",
-        "patients at risk"
+        "outage", "critical", "patients at risk"
     ]
 
     urgent = any(word in question for word in urgent_words)
@@ -61,61 +65,68 @@ def intake_agent(state):
     }
 
 
-# Agent 2: Provide troubleshooting steps
+# Agent 2: Search ChromaDB and generate an AI answer
 def knowledge_agent(state):
-    issue = state["issue_type"]
+    question = state["question"]
 
-    solutions = {
-        "EHR Problem": (
-            "If you cannot access the EHR system:\n\n"
-            "1. Check your network connection.\n"
-            "2. Make sure you are using the correct login.\n"
-            "3. Try signing in again.\n"
-            "4. If the issue continues, contact IT support.\n\n"
-            "Never share your password."
-        ),
+    # Retrieve relevant instructions from ChromaDB
+    context = search_knowledge(question)
 
-        "Printer Problem": (
-            "If your printer is not working:\n\n"
-            "1. Check that the printer is turned on.\n"
-            "2. Make sure it has paper and ink or toner.\n"
-            "3. Check the printer connection.\n"
-            "4. Try printing a test page.\n"
-            "5. Contact IT if the issue continues."
-        ),
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
 
-        "Network Problem": (
-            "If your network or Wi-Fi is not working:\n\n"
-            "1. Check whether Wi-Fi is enabled.\n"
-            "2. Make sure you are connected to the "
-            "approved hospital network.\n"
-            "3. Check if other approved websites work.\n"
-            "4. Contact IT if the connection is still down.\n\n"
-            "Do not connect hospital devices to "
-            "unapproved networks."
-        ),
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is missing")
 
-        "Computer Problem": (
-            "If your computer is not working:\n\n"
-            "1. Check the power connection.\n"
-            "2. Make sure the monitor is turned on.\n"
-            "3. Check the keyboard and mouse.\n"
-            "4. Restart only if hospital policy allows it.\n"
-            "5. Contact IT if the problem continues."
-        ),
+        client = genai.Client(api_key=api_key)
 
-        "Other": (
-            "I can help with hospital IT problems "
-            "such as EHR access, computers, printers, "
-            "and network connections.\n\n"
-            "Please describe the problem in more detail."
+        prompt = f"""
+You are CareConnect AI, a hospital IT support assistant.
+
+Answer the question using only the IT guide below.
+
+Rules:
+- Give simple, clear troubleshooting steps.
+- Do not invent instructions or hospital policies.
+- Never request patient names or medical information.
+- If the guide does not answer the question, recommend IT support.
+- Do not claim a real ticket was created.
+- Keep your response short and professional.
+
+IT Guide:
+{context}
+
+User Question:
+{question}
+"""
+
+        result = client.models.generate_content(
+            model="gemini-4-neon",
+            contents=prompt
         )
-    }
 
-    return {"response": solutions[issue]}
+        state["response"] = (
+            result.text or "Please contact IT support."
+        )
+
+    except Exception as e:
+        print(
+            "GEMINI ERROR:",
+            type(e).__name__,
+            str(e),
+            flush=True
+        )
+
+        state["response"] = (
+            "AI-generated guidance is currently unavailable.\n\n"
+            "Here are the instructions from the IT guide:\n\n"
+            f"{context}"
+        )
+
+    return state
 
 
-# Agent 3: Create a demo support ticket
+# Agent 3: Create demo support tickets through MCP
 def workflow_agent(state):
     question = state["question"].lower()
 
@@ -126,23 +137,47 @@ def workflow_agent(state):
         "create a ticket"
     ]
 
-    if any(word in question for word in ticket_words):
-        ticket = "IT-" + uuid4().hex[:8].upper()
+    if not any(word in question for word in ticket_words):
+        return {"ticket": ""}
+
+    try:
+        # Call the MCP server through the MCP client
+        result = create_mcp_ticket(
+            state["issue_type"],
+            state["question"]
+        )
+
+        ticket = result["ticket_id"]
 
         return {
             "ticket": ticket,
             "response": (
                 state["response"]
-                + "\n\n---\n"
-                + f"Support Ticket: {ticket}\n\n"
-                + f"Issue Type: {state['issue_type']}\n\n"
-                + "Status: Demo ticket created\n\n"
+                + "\n\n---\n\n"
+                + f"**MCP Support Ticket:** {ticket}\n\n"
+                + f"**Issue Type:** {state['issue_type']}\n\n"
+                + "**Status:** Demo ticket created through MCP\n\n"
                 + "This is a sample ticket only. "
                 + "No real IT request has been submitted."
             )
         }
 
-    return {"ticket": ""}
+    except Exception as e:
+        print(
+            "MCP ERROR:",
+            type(e).__name__,
+            str(e),
+            flush=True
+        )
+
+        return {
+            "ticket": "",
+            "response": (
+                state["response"]
+                + "\n\nThe demo ticket tool is currently unavailable. "
+                + "No ticket was created."
+            )
+        }
 
 
 # Agent 4: Escalate urgent IT problems
@@ -152,14 +187,14 @@ def escalation_agent(state):
     return {
         "ticket": ticket,
         "response": (
-            "🚨 URGENT IT ISSUE\n\n"
-            f"Issue Type: {state['issue_type']}\n\n"
-            f"Demo Escalation Ticket: {ticket}\n\n"
-            "Priority: Critical\n\n"
+            "🚨 **URGENT IT ISSUE**\n\n"
+            f"**Issue Type:** {state['issue_type']}\n\n"
+            f"**Demo Escalation Ticket:** {ticket}\n\n"
+            "**Priority:** Critical\n\n"
             "This issue may affect hospital operations "
             "or patient care.\n\n"
-            "Please contact your hospital's emergency "
-            "IT support team immediately and follow "
+            "Contact your hospital's emergency IT "
+            "support team immediately and follow "
             "the hospital's downtime procedures.\n\n"
             "This is a demonstration only. "
             "No real alert or ticket has been sent."
@@ -167,7 +202,7 @@ def escalation_agent(state):
     }
 
 
-# Decide which agent handles the problem
+# Decide which agent handles the request
 def route_request(state):
     if state["urgent"]:
         return "Escalation Agent"
@@ -219,7 +254,7 @@ st.write(
 )
 
 
-# Store conversation history
+# Store chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -231,7 +266,9 @@ for message in st.session_state.messages:
 
 
 # Chat input
-question = st.chat_input("Describe your IT problem...")
+question = st.chat_input(
+    "Describe your IT problem..."
+)
 
 if question:
     st.session_state.messages.append({
@@ -242,13 +279,15 @@ if question:
     with st.chat_message("user"):
         st.write(question)
 
-    result = app_graph.invoke({
-        "question": question,
-        "issue_type": "",
-        "urgent": False,
-        "response": "",
-        "ticket": ""
-    })
+    # Run the four-agent workflow
+    with st.spinner("Checking IT support instructions..."):
+        result = app_graph.invoke({
+            "question": question,
+            "issue_type": "",
+            "urgent": False,
+            "response": "",
+            "ticket": ""
+        })
 
     answer = result["response"]
 
